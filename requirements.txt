@@ -1,5 +1,6 @@
 streamlit
 plotly
 pandas
-scipy.stats 
 numpy
+pearsonr
+ttest_ind
