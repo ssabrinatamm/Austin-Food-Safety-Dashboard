@@ -3,7 +3,7 @@ import pandas as pd
 import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
-from scipy.stats import pearsonr
+from scipy.stats import pearsonr, ttest_ind
 
 # ─────────────────────────────────────────────
 # PAGE CONFIG
@@ -842,6 +842,78 @@ with tabs[5]:
     st.markdown('<div class="badge">Argument 6</div>', unsafe_allow_html=True)
     st.markdown("### Do local and chain restaurants score differently?")
 
+    filtered_lc = filtered[filtered["Restaurant Type"].isin(["Local", "Chain"])].copy()
+    local_scores_tab = filtered_lc[filtered_lc["Restaurant Type"] == "Local"]["Score"]
+    chain_scores_tab = filtered_lc[filtered_lc["Restaurant Type"] == "Chain"]["Score"]
+
+    local_mean_tab = float(local_scores_tab.mean()) if not local_scores_tab.empty else np.nan
+    chain_mean_tab = float(chain_scores_tab.mean()) if not chain_scores_tab.empty else np.nan
+    local_median_tab = float(local_scores_tab.median()) if not local_scores_tab.empty else np.nan
+    chain_median_tab = float(chain_scores_tab.median()) if not chain_scores_tab.empty else np.nan
+
+    t_stat = np.nan
+    t_pval = np.nan
+    if len(local_scores_tab) >= 2 and len(chain_scores_tab) >= 2:
+        t_stat, t_pval = ttest_ind(local_scores_tab, chain_scores_tab, equal_var=False, nan_policy="omit")
+
+    zip_type_scores = (
+        filtered_lc.groupby(["Zip Code", "Restaurant Type"])
+        .agg(Avg_Score=("Score", "mean"), Count=("Score", "count"), Median_Income=("Median_Income", "first"))
+        .reset_index()
+    )
+    zip_income = filtered_lc.groupby("Zip Code").agg(Median_Income=("Median_Income", "first")).reset_index()
+    zip_counts = (
+        filtered_lc.groupby(["Zip Code", "Restaurant Type"])
+        .size()
+        .unstack(fill_value=0)
+        .reset_index()
+    )
+    if "Local" not in zip_counts.columns:
+        zip_counts["Local"] = 0
+    if "Chain" not in zip_counts.columns:
+        zip_counts["Chain"] = 0
+    zip_counts["Total"] = zip_counts["Local"] + zip_counts["Chain"]
+    zip_counts = zip_counts[zip_counts["Total"] > 0].copy()
+    zip_counts["Local_Share"] = zip_counts["Local"] / zip_counts["Total"]
+    zip_counts["Dominance"] = np.where(
+        zip_counts["Local"] > zip_counts["Chain"],
+        "Local-dominant",
+        np.where(zip_counts["Chain"] > zip_counts["Local"], "Chain-dominant", "Balanced"),
+    )
+
+    zip_avg_scores = (
+        filtered_lc.groupby("Zip Code")
+        .agg(Avg_Score=("Score", "mean"), Median_Income=("Median_Income", "first"))
+        .reset_index()
+    )
+    zip_scatter = zip_avg_scores.merge(
+        zip_counts[["Zip Code", "Local", "Chain", "Total", "Local_Share", "Dominance"]],
+        on="Zip Code",
+        how="inner",
+    )
+
+    zip_wide = (
+        zip_type_scores.pivot_table(index="Zip Code", columns="Restaurant Type", values="Avg_Score", aggfunc="mean")
+        .reset_index()
+    )
+    score_gap_df = (
+        zip_wide.merge(zip_counts[["Zip Code", "Local_Share", "Total"]], on="Zip Code", how="inner")
+        .merge(zip_income, on="Zip Code", how="left")
+    )
+    if "Local" not in score_gap_df.columns:
+        score_gap_df["Local"] = np.nan
+    if "Chain" not in score_gap_df.columns:
+        score_gap_df["Chain"] = np.nan
+    score_gap_df["Score_Gap_Local_minus_Chain"] = score_gap_df["Local"] - score_gap_df["Chain"]
+    score_gap_df = score_gap_df.dropna(subset=["Median_Income", "Score_Gap_Local_minus_Chain", "Local_Share"]) 
+
+    income_gap_corr = np.nan
+    income_gap_pval = np.nan
+    if len(score_gap_df) >= 2:
+        income_gap_corr, income_gap_pval = pearsonr(
+            score_gap_df["Median_Income"], score_gap_df["Score_Gap_Local_minus_Chain"]
+        )
+
     col1, col2 = st.columns(2)
 
     with col1:
@@ -861,46 +933,92 @@ with tabs[5]:
         st.plotly_chart(fig6a, use_container_width=True)
 
     with col2:
-        st.markdown("#### Income vs. Score by Type")
-        scatter_df = (
-            filtered.groupby(["Zip Code", "Restaurant Type"])
-            .agg(Score=("Score", "mean"), Median_Income=("Median_Income", "first"))
-            .reset_index()
-        )
-        fig6b = px.scatter(
-            scatter_df,
-            x="Median_Income", y="Score",
-            color="Restaurant Type",
-            trendline="ols",
-            hover_data=["Zip Code"],
-            color_discrete_map={"Local": "#31688e", "Chain": "#fde725"},
-            title="Wealth vs. Scores: Local vs. Chain",
-            labels={"Median_Income": "Median Income ($)", "Score": "Avg Score"},
-        )
-        fig6b.update_layout(xaxis_tickformat="$,.0f")
-        apply_dark(fig6b, height=380)
-        st.plotly_chart(fig6b, use_container_width=True)
-
-    st.markdown("#### 📐 Pearson Correlation: Income × Score")
-    corr_cols = st.columns(len(all_types) or 1)
-    for i, r_type in enumerate(all_types):
-        subset = scatter_df[scatter_df["Restaurant Type"] == r_type].dropna()
-        if len(subset) >= 2:
-            corr, pval = pearsonr(subset["Median_Income"], subset["Score"])
-            corr_cols[i].metric(
-                f"{r_type} restaurants",
-                f"r = {corr:.3f}",
-                f"p = {pval:.3f}",
+        st.markdown("#### ZIP Codes: Income vs. Average Score")
+        if not zip_scatter.empty:
+            fig6b = px.scatter(
+                zip_scatter,
+                x="Median_Income",
+                y="Avg_Score",
+                size="Total",
+                color="Dominance",
+                trendline="ols",
+                hover_name="Zip Code",
+                hover_data={
+                    "Median_Income": ":$,.0f",
+                    "Avg_Score": ":.2f",
+                    "Local": True,
+                    "Chain": True,
+                    "Local_Share": ":.2%",
+                    "Dominance": True,
+                    "Total": True,
+                },
+                labels={
+                    "Median_Income": "Median Income ($)",
+                    "Avg_Score": "Average Inspection Score",
+                    "Dominance": "ZIP Composition",
+                    "Total": "Establishments",
+                },
+                color_discrete_map={
+                    "Local-dominant": "#31688e",
+                    "Chain-dominant": "#fde725",
+                    "Balanced": "#7c6fa0",
+                },
+                title="ZIP Codes by Income and Average Score (Color = Local vs Chain Dominance)",
             )
+            fig6b.update_layout(xaxis_tickformat="$,.0f", legend_title_text="ZIP Composition")
+            apply_dark(fig6b, height=380)
+            st.plotly_chart(fig6b, use_container_width=True)
+        else:
+            st.info("Not enough Local/Chain data in the current filter selection to plot ZIP-level results.")
+
+    st.markdown("#### 📐 Statistical Summary")
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Local mean score", f"{local_mean_tab:.2f}" if pd.notna(local_mean_tab) else "—")
+    m2.metric("Chain mean score", f"{chain_mean_tab:.2f}" if pd.notna(chain_mean_tab) else "—")
+    m3.metric(
+        "Mean difference (Local - Chain)",
+        f"{(local_mean_tab - chain_mean_tab):+.2f}" if pd.notna(local_mean_tab) and pd.notna(chain_mean_tab) else "—",
+    )
+    m4.metric(
+        "Welch t-test p-value",
+        f"{t_pval:.3g}" if pd.notna(t_pval) else "—",
+        "significant" if pd.notna(t_pval) and t_pval < 0.05 else "not significant" if pd.notna(t_pval) else None,
+    )
+
+    if not score_gap_df.empty:
+        income_gap_text = (
+            f"r = {income_gap_corr:.3f}, p = {income_gap_pval:.3f}"
+            if pd.notna(income_gap_corr)
+            else "not available"
+        )
+        top_local_adv = score_gap_df.sort_values("Score_Gap_Local_minus_Chain", ascending=False).head(1)
+        top_chain_adv = score_gap_df.sort_values("Score_Gap_Local_minus_Chain", ascending=True).head(1)
+        top_local_adv_str = (
+            f"ZIP <strong>{top_local_adv['Zip Code'].iat[0]}</strong> ({top_local_adv['Score_Gap_Local_minus_Chain'].iat[0]:+.2f})"
+            if not top_local_adv.empty
+            else "N/A"
+        )
+        top_chain_adv_str = (
+            f"ZIP <strong>{top_chain_adv['Zip Code'].iat[0]}</strong> ({top_chain_adv['Score_Gap_Local_minus_Chain'].iat[0]:+.2f})"
+            if not top_chain_adv.empty
+            else "N/A"
+        )
+    else:
+        income_gap_text = "not available"
+        top_local_adv_str = "N/A"
+        top_chain_adv_str = "N/A"
 
     st.markdown(
         f'<div class="conclusion-box"><strong>📌 Finding:</strong> Local restaurants average '
-        f"<strong>{_local_mean}</strong> (median: {_local_median}) while chain restaurants average "
-        f"<strong>{_chain_mean}</strong> (median: {_chain_median}) — a difference of only "
-        f"<strong>{abs(_local_mean - _chain_mean):.2f} points</strong>. "
-        f"{'Local restaurants score slightly higher on average.' if _local_mean > _chain_mean else 'Chain restaurants score slightly higher on average.'} "
-        f"Neither type shows a meaningful relationship between neighborhood income and score, "
-        f"reinforcing that compliance is driven by establishment-level behavior, not restaurant type or wealth.</div>",
+        f"<strong>{local_mean_tab:.2f}</strong> (median: {local_median_tab:.2f}) while chain restaurants average "
+        f"<strong>{chain_mean_tab:.2f}</strong> (median: {chain_median_tab:.2f}). "
+        f"The mean gap is <strong>{(local_mean_tab - chain_mean_tab):+.2f}</strong> points and the Welch t-test yields "
+        f"<strong>p = {t_pval:.3g}</strong>, which is "
+        f"<strong>{'statistically significant' if pd.notna(t_pval) and t_pval < 0.05 else 'not statistically significant'}</strong>. "
+        f"At the ZIP level, the correlation between median income and the local-minus-chain score gap is "
+        f"<strong>{income_gap_text}</strong>, indicating "
+        f"<strong>{'a statistically significant relationship' if pd.notna(income_gap_pval) and income_gap_pval < 0.05 else 'no statistically significant relationship'}</strong> "
+        f"in the current filter view. Largest local advantage: {top_local_adv_str}; largest chain advantage: {top_chain_adv_str}.</div>",
         unsafe_allow_html=True,
     )
 
