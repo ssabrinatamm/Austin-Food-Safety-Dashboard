@@ -260,6 +260,7 @@ PAPER_BG = "rgba(0,0,0,0)"
 PLOT_BG = "#fafafa"
 GRID_COLOR = "#ede8fb"
 FONT_COLOR = "#2d2448"
+TX_ZIP_GEOJSON_URL = "https://raw.githubusercontent.com/OpenDataDE/State-zip-code-GeoJSON/master/tx_texas_zip_codes_geo.min.json"
 
 def apply_dark(fig, height=420):
     fig.update_layout(
@@ -273,6 +274,37 @@ def apply_dark(fig, height=420):
         yaxis=dict(gridcolor=GRID_COLOR, zeroline=False, linecolor="#e4dcf8"),
     )
     return fig
+
+
+@st.cache_data
+def get_zip_coordinates(zip_codes):
+    zip_list = sorted({str(z) for z in zip_codes if pd.notna(z)})
+    zip_df = pd.DataFrame({"Zip Code": zip_list})
+    zip_df["Latitude"] = np.nan
+    zip_df["Longitude"] = np.nan
+
+    try:
+        import pgeocode
+        nomi = pgeocode.Nominatim("us")
+        coords = nomi.query_postal_code(zip_list)
+        zip_df["Latitude"] = pd.to_numeric(coords["latitude"], errors="coerce")
+        zip_df["Longitude"] = pd.to_numeric(coords["longitude"], errors="coerce")
+    except Exception:
+        pass
+
+    center_lat, center_lon = 30.2672, -97.7431
+    missing = zip_df["Latitude"].isna() | zip_df["Longitude"].isna()
+    if missing.any():
+        fallback_lat = []
+        fallback_lon = []
+        for z in zip_df.loc[missing, "Zip Code"]:
+            z_num = int("".join(ch for ch in str(z) if ch.isdigit()) or 0)
+            fallback_lat.append(center_lat + (((z_num % 23) - 11) * 0.008))
+            fallback_lon.append(center_lon + (((z_num % 29) - 14) * 0.008))
+        zip_df.loc[missing, "Latitude"] = fallback_lat
+        zip_df.loc[missing, "Longitude"] = fallback_lon
+
+    return zip_df
 
 # ─────────────────────────────────────────────
 # HEADER
@@ -516,6 +548,46 @@ with tabs[2]:
     apply_dark(fig3, height=500)
     st.plotly_chart(fig3, use_container_width=True)
 
+    st.markdown("#### ZIP Choropleth: Average Inspection Scores")
+    score_map_view = st.radio(
+        "Map View",
+        ["All ZIPs", "Important ZIP Codes"],
+        index=0,
+        key="score_map_view_filter",
+        horizontal=True,
+    )
+    score_map_df = (
+        df_2024.groupby("Zip Code")
+        .agg(Avg_Inspection_Score=("Score", "mean"), Inspections=("Score", "count"))
+        .reset_index()
+    )
+    if score_map_view == "Important ZIP Codes":
+        score_map_df = score_map_df[score_map_df["Zip Code"].isin(["78745", "78744", "78705", "78721"])]
+    if not score_map_df.empty:
+        score_map_df["Zip Code"] = score_map_df["Zip Code"].astype(str).str.zfill(5)
+        fig3_map = px.choropleth(
+            score_map_df,
+            geojson=TX_ZIP_GEOJSON_URL,
+            locations="Zip Code",
+            featureidkey="properties.ZCTA5CE10",
+            color="Avg_Inspection_Score",
+            color_continuous_scale="Viridis",
+            hover_name="Zip Code",
+            hover_data={"Avg_Inspection_Score": ":.2f", "Inspections": True},
+            labels={"Avg_Inspection_Score": "Avg Score"},
+            title="Austin ZIP Choropleth: Average Inspection Score",
+        )
+        fig3_map.update_geos(fitbounds="locations", visible=False)
+        fig3_map.update_layout(
+            paper_bgcolor="rgba(0,0,0,0)",
+            plot_bgcolor="rgba(0,0,0,0)",
+            font=dict(family="Poppins", color=FONT_COLOR, size=12),
+            height=500,
+            margin=dict(l=0, r=0, t=50, b=0),
+            coloraxis_colorbar=dict(title="Avg Score"),
+        )
+        st.plotly_chart(fig3_map, use_container_width=True)
+
     _stable_str   = f"ZIP <strong>{_most_stable['Zip Code']}</strong> (std = {_most_stable['std']:.2f}, range {_most_stable['min']:.1f}–{_most_stable['max']:.1f})" if _most_stable is not None else "N/A"
     _volatile_str = f"ZIP <strong>{_most_volatile['Zip Code']}</strong> (std = {_most_volatile['std']:.2f}, range {_most_volatile['min']:.1f}–{_most_volatile['max']:.1f})" if _most_volatile is not None else "N/A"
     _start_score  = round(_overall_trend.iloc[0]["Average_Inspection_Score"], 1) if not _overall_trend.empty else 0
@@ -578,6 +650,48 @@ with tabs[3]:
         fig4.update_layout(yaxis_range=[0, 200000], yaxis_tickprefix="$", yaxis_tickformat=",")
         apply_dark(fig4, height=480)
         st.plotly_chart(fig4, use_container_width=True)
+
+        st.markdown("#### ZIP Choropleth: Median Income")
+        income_map_view = st.radio(
+            "Income Map View",
+            ["All ZIPs", "Important ZIP Codes"],
+            index=0,
+            key="income_map_view_filter",
+            horizontal=True,
+        )
+        income_map_df = (
+            df_census_final[["Zip Code", "Median_Income"]]
+            .dropna(subset=["Zip Code", "Median_Income"])
+            .drop_duplicates(subset=["Zip Code"])
+            .copy()
+        )
+        if income_map_view == "Important ZIP Codes":
+            income_map_df = income_map_df[income_map_df["Zip Code"].isin(["78745", "78744", "78705", "78721"])]
+        income_map_df["Zip Code"] = income_map_df["Zip Code"].astype(str).str.zfill(5)
+
+        if not income_map_df.empty:
+            fig4_map = px.choropleth(
+                income_map_df,
+                geojson=TX_ZIP_GEOJSON_URL,
+                locations="Zip Code",
+                featureidkey="properties.ZCTA5CE10",
+                color="Median_Income",
+                color_continuous_scale="Viridis",
+                hover_name="Zip Code",
+                hover_data={"Median_Income": ":$,.0f"},
+                labels={"Median_Income": "Median Household Income"},
+                title="Austin Neighborhood Wealth Distribution",
+            )
+            fig4_map.update_geos(fitbounds="locations", visible=False)
+            fig4_map.update_layout(
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                font=dict(family="Poppins", color=FONT_COLOR, size=12),
+                height=500,
+                margin=dict(l=0, r=0, t=50, b=0),
+                coloraxis_colorbar=dict(title="Median Income"),
+            )
+            st.plotly_chart(fig4_map, use_container_width=True)
 
         _race_avg = df_plot.groupby("Group")["Median Household Income"].mean().dropna().sort_values(ascending=False)
         _top_group    = _race_avg.index[0]  if len(_race_avg) > 0 else "N/A"
@@ -646,6 +760,70 @@ with tabs[4]:
         fig5.update_layout(xaxis={"categoryorder": "total descending"})
         apply_dark(fig5)
         st.plotly_chart(fig5, use_container_width=True)
+
+        st.markdown("#### ZIP Choropleth: Local vs Chain Composition")
+        comp_map_view = st.radio(
+            "Composition Map View",
+            ["All ZIPs", "Top 5 Local + Top 5 Chain Composition"],
+            index=0,
+            key="composition_map_view_filter",
+            horizontal=True,
+        )
+
+        comp_wide = (
+            plot_df.pivot_table(
+                index="Zip Code",
+                columns="Restaurant Type",
+                values="Composition_Pct",
+                aggfunc="max",
+                fill_value=0,
+            )
+            .reset_index()
+        )
+        if "Local" not in comp_wide.columns:
+            comp_wide["Local"] = 0.0
+        if "Chain" not in comp_wide.columns:
+            comp_wide["Chain"] = 0.0
+        comp_wide["Local_minus_Chain_Pct"] = comp_wide["Local"] - comp_wide["Chain"]
+
+        if comp_map_view == "Top 5 Local + Top 5 Chain Composition":
+            top_local_map = comp_wide.nlargest(5, "Local")["Zip Code"].tolist()
+            top_chain_map = comp_wide.nlargest(5, "Chain")["Zip Code"].tolist()
+            map_selected = list(dict.fromkeys(top_local_map + top_chain_map))
+            comp_wide = comp_wide[comp_wide["Zip Code"].isin(map_selected)]
+
+        if not comp_wide.empty:
+            comp_wide["Zip Code"] = comp_wide["Zip Code"].astype(str).str.zfill(5)
+            fig5_map = px.choropleth(
+                comp_wide,
+                geojson=TX_ZIP_GEOJSON_URL,
+                locations="Zip Code",
+                featureidkey="properties.ZCTA5CE10",
+                color="Local_minus_Chain_Pct",
+                color_continuous_scale="Viridis",
+                hover_name="Zip Code",
+                hover_data={
+                    "Local": ":.1f",
+                    "Chain": ":.1f",
+                    "Local_minus_Chain_Pct": ":.1f",
+                },
+                labels={
+                    "Local": "Local %",
+                    "Chain": "Chain %",
+                    "Local_minus_Chain_Pct": "Local - Chain (pp)",
+                },
+                title="Where Local Restaurants Dominate (positive = more local, negative = more chain)",
+            )
+            fig5_map.update_geos(fitbounds="locations", visible=False)
+            fig5_map.update_layout(
+                paper_bgcolor="rgba(0,0,0,0)",
+                plot_bgcolor="rgba(0,0,0,0)",
+                font=dict(family="Poppins", color=FONT_COLOR, size=12),
+                height=500,
+                margin=dict(l=0, r=0, t=50, b=0),
+                coloraxis_colorbar=dict(title="Local - Chain (pp)"),
+            )
+            st.plotly_chart(fig5_map, use_container_width=True)
 
     st.markdown(
         f'<div class="conclusion-box"><strong>📌 Finding:</strong> Across all 2024 inspections, '
