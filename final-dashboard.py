@@ -519,8 +519,30 @@ with tabs[2]:
     import plotly.colors as pc
     all_time_zips = sorted(df_time["Zip Code"].astype(str).unique())
     n_colors = max(len(all_time_zips), 1)
-    viridis_colors = pc.sample_colorscale("Viridis", [i / max(n_colors - 1, 1) for i in range(n_colors)])
-    zip_color_map = {z: viridis_colors[i] for i, z in enumerate(all_time_zips)}
+
+    # Prefer a qualitative palette for distinct line colors; fall back to HSL generation
+    qualitative_palettes = [
+        getattr(pc.qualitative, name)
+        for name in ("Dark24", "Light24", "Plotly", "D3", "Bold", "Safe")
+        if hasattr(pc.qualitative, name)
+    ]
+    palette = None
+    for p in qualitative_palettes:
+        if len(p) >= n_colors:
+            palette = p
+            break
+
+    if palette is None:
+        # generate visually distinct colors by spacing hues evenly (HSL -> HEX)
+        def hsl_to_hex(h, s=70, l=50):
+            import colorsys
+
+            r, g, b = colorsys.hls_to_rgb(h / 360.0, l / 100.0, s / 100.0)
+            return f"#{int(r*255):02x}{int(g*255):02x}{int(b*255):02x}"
+
+        palette = [hsl_to_hex((i * 360.0 / n_colors) % 360) for i in range(n_colors)]
+
+    zip_color_map = {z: palette[i % len(palette)] for i, z in enumerate(all_time_zips)}
 
     fig3 = go.Figure()
     for zip_code in all_time_zips:
